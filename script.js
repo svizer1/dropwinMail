@@ -1,13 +1,14 @@
 // script.js - Полная логика для DropWin Mail с управлением несколькими почтами
 
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-const API_BASE = 'http://localhost:3000/api';
-const REFRESH_INTERVAL = 3000; // 3
+const API_BASE = 'http://localhost:3001/api';
+const REFRESH_INTERVAL = 15000;
 const STORAGE_KEY = 'dropwin_emails';
 
 let emails = []; // Массив всех созданных почт
 let currentEmail = null; // Текущая активная почта
 let refreshInterval = null;
+let lastSoundTime = 0;
 
 // ========== DOM ЭЛЕМЕНТЫ ==========
 const createNewEmailBtn = document.getElementById('createNewEmailBtn');
@@ -94,6 +95,8 @@ async function createNewEmail() {
                 address: data.email,
                 username: data.username,
                 domain: data.domain,
+                token: data.token,
+                api: data.api, // Сохраняем тип API
                 createdAt: new Date().toISOString(),
                 messagesCount: 0
             };
@@ -200,23 +203,90 @@ function showNoEmailState() {
 async function fetchMessages() {
     if (!currentEmail) return;
     
+    // Сразу показываем сохраненные письма, если есть
+    if (currentEmail.messages && currentEmail.messages.length > 0) {
+        displayMessages(currentEmail.messages);
+        messagesCount.textContent = `${currentEmail.messages.length} ${getMessageWord(currentEmail.messages.length)}`;
+    }
+
     try {
-        const response = await fetch(
-            `${API_BASE}/get-messages?email=${encodeURIComponent(currentEmail.address)}`
-        );
+        let url = `${API_BASE}/get-messages?email=${encodeURIComponent(currentEmail.address)}`;
+        if (currentEmail.token) {
+            url += `&token=${encodeURIComponent(currentEmail.token)}`;
+        }
+        if (currentEmail.api) {
+            url += `&api=${encodeURIComponent(currentEmail.api)}`;
+        }
+
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data.success) {
             const messages = data.messages || [];
+            const prevIds = new Set((currentEmail.messages || []).map(m => m.id));
+            const newCount = messages.filter(m => !prevIds.has(m.id)).length;
+            if (newCount > 0 && Date.now() - lastSoundTime > 2000) {
+                try {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const o = ctx.createOscillator();
+                    const g = ctx.createGain();
+                    o.type = 'sine';
+                    o.frequency.setValueAtTime(880, ctx.currentTime);
+                    g.gain.setValueAtTime(0, ctx.currentTime);
+                    g.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+                    g.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.35);
+                    o.connect(g);
+                    g.connect(ctx.destination);
+                    o.start();
+                    o.stop(ctx.currentTime + 0.35);
+                } catch (e) {}
+                lastSoundTime = Date.now();
+                showToast('Новое письмо', 'success');
+            }
             
-            // Обновляем счетчик писем
-            currentEmail.messagesCount = messages.length;
-            saveEmailsToStorage();
+            // Если сервер вернул пустой список, но у нас уже были письма
+            // Это может быть ошибкой, если мы не ожидаем удаления
+            // Но в mail.tm письма хранятся на сервере, так что если сервер вернул [], значит их нет.
+            // Однако, чтобы избежать мерцания при сбоях, мы можем проверять messages.length
+            
+            // MERGE logic: обновляем существующие, добавляем новые
+            if (currentEmail.messages && currentEmail.messages.length > 0) {
+                 const mergedMessages = [...currentEmail.messages];
+                 
+                 messages.forEach(newMsg => {
+                     const existingIdx = mergedMessages.findIndex(m => m.id === newMsg.id);
+                     if (existingIdx !== -1) {
+                         // Обновляем (например, если появилось тело письма)
+                         mergedMessages[existingIdx] = { ...mergedMessages[existingIdx], ...newMsg };
+                     } else {
+                         // Добавляем новое
+                         mergedMessages.push(newMsg);
+                     }
+                 });
+                 
+                 // Если сервер вернул полный список, мы должны удалить те, которых нет на сервере?
+                 // Для надежности лучше доверять серверу, если он вернул success: true
+                 // Но если API глючит и возвращает пустой список...
+                 
+                 // ИСПОЛЬЗУЕМ mergedMessages ВМЕСТО ПЕРЕЗАПИСИ
+                 if (mergedMessages.length > 0) {
+                     currentEmail.messages = mergedMessages;
+                 } else if (messages.length > 0) {
+                     currentEmail.messages = messages;
+                 }
+                 // Если и там и там пусто, то ничего не делаем (или очищаем, если нужно)
+            } else {
+                currentEmail.messages = messages;
+            }
+
+            currentEmail.messagesCount = currentEmail.messages.length;
+            
+            saveEmailsToStorage(); // Сохраняем в localStorage
             renderEmailsList();
             
-            messagesCount.textContent = `${messages.length} ${getMessageWord(messages.length)}`;
+            messagesCount.textContent = `${currentEmail.messages.length} ${getMessageWord(currentEmail.messages.length)}`;
             
-            displayMessages(messages);
+            displayMessages(currentEmail.messages);
         }
     } catch (error) {
         console.error('Ошибка получения писем:', error);
@@ -240,8 +310,14 @@ function displayMessages(messages) {
         return;
     }
     
-    // Сортируем по дате (новые сверху)
-    messages.sort((a, b) => b.id - a.id);
+    messages.sort((a, b) => {
+        const da = new Date(a.date || 0).getTime();
+        const db = new Date(b.date || 0).getTime();
+        if (db !== da) return db - da;
+        const ia = String(a.id);
+        const ib = String(b.id);
+        return ib.localeCompare(ia);
+    });
     
     const html = messages.map(msg => `
         <div class="message-item" data-id="${msg.id}">
@@ -266,33 +342,63 @@ function displayMessages(messages) {
 
 // ========== ОТКРЫТИЕ ПИСЬМА ==========
 async function openMessage(messageId) {
+    // Сначала ищем в сохраненных
+    if (currentEmail.messages) {
+        const savedMsg = currentEmail.messages.find(m => m.id == messageId);
+        if (savedMsg && (savedMsg.htmlBody || savedMsg.textBody)) {
+             // Если есть полное тело письма, открываем сразу
+             showModal(savedMsg);
+             // Но все равно можно подгрузить актуальное (опционально)
+             return; 
+        }
+    }
+
     try {
-        const response = await fetch(
-            `${API_BASE}/read-message?email=${encodeURIComponent(currentEmail.address)}&id=${messageId}`
-        );
+        let url = `${API_BASE}/read-message?email=${encodeURIComponent(currentEmail.address)}&id=${messageId}`;
+        if (currentEmail.token) {
+            url += `&token=${encodeURIComponent(currentEmail.token)}`;
+        }
+        if (currentEmail.api) {
+            url += `&api=${encodeURIComponent(currentEmail.api)}`;
+        }
+
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data.success && data.message) {
             const msg = data.message;
             
-            modalSubject.textContent = msg.subject || '(Без темы)';
-            modalFrom.textContent = msg.from;
-            modalDate.textContent = formatDate(msg.date);
-            
-            if (msg.htmlBody) {
-                modalBody.innerHTML = msg.htmlBody;
-            } else if (msg.textBody) {
-                modalBody.textContent = msg.textBody;
-            } else {
-                modalBody.textContent = '(Пустое письмо)';
+            // Обновляем сохраненное письмо полными данными
+            if (currentEmail.messages) {
+                const idx = currentEmail.messages.findIndex(m => m.id == messageId);
+                if (idx !== -1) {
+                    currentEmail.messages[idx] = { ...currentEmail.messages[idx], ...msg };
+                    saveEmailsToStorage();
+                }
             }
-            
-            messageModal.classList.remove('hidden');
+
+            showModal(msg);
         }
     } catch (error) {
         console.error('Ошибка открытия письма:', error);
         showToast('Не удалось открыть письмо', 'error');
     }
+}
+
+function showModal(msg) {
+    modalSubject.textContent = msg.subject || '(Без темы)';
+    modalFrom.textContent = msg.from;
+    modalDate.textContent = formatDate(msg.date);
+    
+    if (msg.htmlBody) {
+        modalBody.innerHTML = msg.htmlBody;
+    } else if (msg.textBody) {
+        modalBody.textContent = msg.textBody;
+    } else {
+        modalBody.textContent = '(Пустое письмо)';
+    }
+    
+    messageModal.classList.remove('hidden');
 }
 
 // ========== ЗАКРЫТИЕ МОДАЛЬНОГО ОКНА ==========

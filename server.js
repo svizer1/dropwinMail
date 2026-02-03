@@ -5,7 +5,7 @@ const axios = require('axios');
 const path = require('path');
 
 const app = express();
-const PORT = 3000;
+const PORT = 3001;
 
 // Middleware
 app.use(cors());
@@ -28,23 +28,121 @@ const EMAIL_APIS = {
         name: 'tempmail.lol',
         baseUrl: 'https://api.tempmail.lol',
         domains: ['tempmail.lol']
+    },
+    mailtm: {
+        name: 'mail.tm',
+        baseUrl: 'https://api.mail.tm',
+        domains: ['virgilian.com', 'mail.tm']
     }
 };
 
-let currentAPI = EMAIL_APIS.secmail; // По умолчанию используем 1secmail
+// Настраиваем axios с User-Agent
+axios.defaults.headers.common['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+let currentAPI = EMAIL_APIS.tempmail; // По умолчанию tempmail.lol так как он работает стабильнее 
+
+/**
+ * Получение доменов для mail.tm
+ */
+async function getMailTmDomain() {
+    try {
+        const response = await axios.get(`${EMAIL_APIS.mailtm.baseUrl}/domains`);
+        if (response.data['hydra:member'] && response.data['hydra:member'].length > 0) {
+            // Берем первый активный домен
+            return response.data['hydra:member'][0].domain;
+        }
+    } catch (error) {
+        console.error('Ошибка получения домена mail.tm:', error.message);
+    }
+    // Fallback domain if API fails
+    return 'virgilian.com';
+}
+
+/**
+ * Создание email через mail.tm API (с префиксом DropWin)
+ */
+async function createMailTmEmail() {
+    try {
+        const domain = await getMailTmDomain();
+        const randomNum = Math.floor(Math.random() * 90000) + 10000;
+        const username = `dropwin${randomNum}`; // Реализуем пожелание пользователя (lowercase)
+        const email = `${username}@${domain}`.toLowerCase();
+        const password = `DropWin${randomNum}!`; // Простой пароль для доступа
+
+        // 1. Создаем аккаунт
+        await axios.post(`${EMAIL_APIS.mailtm.baseUrl}/accounts`, {
+            address: email,
+            password: password
+        });
+
+        // 2. Получаем токен
+        const tokenResp = await axios.post(`${EMAIL_APIS.mailtm.baseUrl}/token`, {
+            address: email,
+            password: password
+        });
+        
+        const token = tokenResp.data.token;
+
+        console.log(`✅ mail.tm создан: ${email}`);
+
+        return {
+            success: true,
+            email: email,
+            username: username,
+            domain: domain,
+            token: token,
+            password: password, // Можно вернуть, если нужно
+            api: 'mail.tm'
+        };
+
+    } catch (error) {
+        console.log('❌ mail.tm ошибка:', error.message);
+        if (error.response) {
+            console.log('   Детали:', error.response.data);
+            if (error.response.status === 422) {
+                 // Username taken or invalid format. Retry?
+                 // Let's assume username taken, though random is high.
+                 console.log('   (Скорее всего имя занято или формат неверен)');
+            }
+        }
+    }
+    return null;
+}
 
 /**
  * Генерация случайного имени пользователя
  */
 function generateUsername() {
-    const prefixes = ['drop', 'temp', 'quick', 'fast', 'safe', 'anon', 'win', 'mail', 'box', 'secure'];
-    const suffixes = ['mail', 'post', 'box', 'drop', 'win', 'safe', 'fast', 'temp', 'user', 'test'];
-    const numbers = Math.floor(Math.random() * 9000) + 1000;
+    const numbers = Math.floor(Math.random() * 90000) + 10000;
+    return `dropwin${numbers}`; // СТРОГО dropwin + цифры
+}
 
-    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-    const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
-
-    return `${prefix}${suffix}${numbers}`.toLowerCase();
+/**
+ * Создание email через tempmail.lol API
+ */
+async function createTempMailLolEmail() {
+    try {
+        const response = await axios.get(`${currentAPI.baseUrl}/generate`);
+        
+        if (response.data && response.data.address) {
+            const email = response.data.address;
+            const token = response.data.token;
+            console.log(`✅ tempmail.lol сгенерировал: ${email}`);
+            
+            const [username, domain] = email.split('@');
+            return {
+                success: true,
+                email: email,
+                username: username,
+                domain: domain,
+                token: token,
+                api: 'tempmail.lol'
+            };
+        }
+    } catch (error) {
+        console.log('❌ tempmail.lol API недоступен:', error.message);
+    }
+    return null;
 }
 
 /**
@@ -101,33 +199,58 @@ app.get('/api/generate-email', async (req, res) => {
     try {
         console.log('🔄 Создание новой временной почты...');
 
-        const result = await createSecmailEmail();
+        let result;
+        
+        if (currentAPI.name === 'tempmail.lol') {
+            result = await createTempMailLolEmail();
+        } else if (currentAPI.name === 'mail.tm') {
+            result = await createMailTmEmail();
+        } else {
+            result = await createSecmailEmail();
+        }
 
-        res.json({
-            success: true,
-            email: result.email,
-            username: result.username,
-            domain: result.domain,
-            api: result.api,
-            message: 'Реальная временная почта! Отправляйте письма.',
-            isReal: true
-        });
+        if (result && result.success) {
+            res.json({
+                success: true,
+                email: result.email,
+                username: result.username,
+                domain: result.domain,
+                token: result.token, // Важно для tempmail.lol
+                api: result.api,
+                message: 'Реальная временная почта! Отправляйте письма.',
+                isReal: true
+            });
+        } else {
+            throw new Error('Не удалось создать почту через API');
+        }
 
     } catch (error) {
         console.error('❌ Ошибка создания почты:', error.message);
 
-        const username = generateUsername();
-        const domain = currentAPI.domains[0];
-        const email = `${username}@${domain}`;
+        // В случае ошибки мы НЕ ДОЛЖНЫ возвращать фейковый адрес mail.tm
+        // Вместо этого мы должны попробовать другой API (tempmail.lol) полностью
+        
+        console.log('🔄 Пробуем Fallback (tempmail.lol)...');
+        const fallbackResult = await createTempMailLolEmail();
+        
+        if (fallbackResult && fallbackResult.success) {
+             res.json({
+                success: true,
+                email: fallbackResult.email,
+                username: fallbackResult.username,
+                domain: fallbackResult.domain,
+                token: fallbackResult.token,
+                api: fallbackResult.api,
+                message: 'Создан резервный адрес (основной сервис перегружен)',
+                isReal: true
+            });
+            return;
+        }
 
-        res.json({
-            success: true,
-            email: email,
-            username: username,
-            domain: domain,
-            api: 'fallback',
-            message: 'Email создан (если письма не приходят, попробуйте другую почту)',
-            isReal: true
+        // Если совсем всё плохо
+        res.status(500).json({
+            success: false,
+            error: 'Не удалось создать почту. Попробуйте позже.'
         });
     }
 });
@@ -137,7 +260,7 @@ app.get('/api/generate-email', async (req, res) => {
  */
 app.get('/api/get-messages', async (req, res) => {
     try {
-        const { email } = req.query;
+        const { email, token, api } = req.query;
 
         if (!email) {
             return res.status(400).json({
@@ -146,30 +269,97 @@ app.get('/api/get-messages', async (req, res) => {
             });
         }
 
-        const [username, domain] = email.split('@');
+        console.log(`📬 Проверка писем для: ${email}`);
+        let messages = [];
 
-        if (!username || !domain) {
-            return res.status(400).json({
-                success: false,
-                error: 'Неверный формат email'
+        // Определяем целевой API
+        let targetAPI = currentAPI.name;
+        
+        // Более точное определение API по домену или токену
+        if (token && (email.includes('virgilian.com') || email.includes('mail.tm'))) {
+            targetAPI = 'mail.tm';
+        } else if (token && (email.includes('tempmail.lol') || email.includes('chessgamingworld.com') || email.includes('leadharbor.org'))) {
+             // Список доменов tempmail.lol может меняться, но если не mail.tm и есть токен, скорее всего это tempmail.lol
+             targetAPI = 'tempmail.lol';
+        } else if (api) {
+            targetAPI = api; // Если клиент передал тип API явно
+        } else if (token && !email.includes('virgilian') && !email.includes('mail.tm')) {
+             // Fallback: если есть токен и не mail.tm, считаем tempmail.lol
+             targetAPI = 'tempmail.lol';
+        } else {
+             targetAPI = '1secmail';
+        }
+        
+        console.log(`🔎 Определен API: ${targetAPI} для ${email}`);
+
+        if (targetAPI === 'mail.tm') {
+            if (!token) {
+                 return res.json({ success: true, messages: [], count: 0 });
+            }
+
+            try {
+                const response = await axios.get(`${EMAIL_APIS.mailtm.baseUrl}/messages`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                    params: { page: 1, itemsPerPage: 100 }, // Запрашиваем больше писем
+                    timeout: 15000
+                });
+                
+                if (response.data && Array.isArray(response.data['hydra:member'])) {
+                    messages = response.data['hydra:member'];
+                } else {
+                    console.log('⚠️ mail.tm вернул странный ответ:', JSON.stringify(response.data).substring(0, 100));
+                    messages = [];
+                }
+            } catch (e) {
+                console.error('Ошибка проверки почты mail.tm:', e.message);
+                // Если токен невалиден (401), можно вернуть ошибку, чтобы клиент знал
+                if (e.response && e.response.status === 401) {
+                     return res.status(401).json({ success: false, error: 'Сессия истекла' });
+                }
+                // Не возвращаем success: true, если произошла ошибка сети
+                return res.status(500).json({ success: false, error: 'Ошибка сети mail.tm' });
+            }
+
+        } else if (targetAPI === 'tempmail.lol' || currentAPI.name === 'tempmail.lol') {
+            if (!token) {
+                 // Если токена нет, мы не можем проверить почту на tempmail.lol
+                 // Но может это старая почта 1secmail?
+                 // Попробуем логику для fallback или вернем ошибку
+                 console.log('⚠️ Нет токена для tempmail.lol');
+                 return res.json({ success: true, messages: [], count: 0 });
+            }
+
+            const response = await axios.get(`${EMAIL_APIS.tempmail.baseUrl}/auth/${token}`, {
+                timeout: 15000
             });
+            
+            // tempmail.lol возвращает { email: [...] }
+            messages = response.data.email || [];
+            
+        } else {
+            // Logic for 1secmail
+            const [username, domain] = email.split('@');
+            if (!username || !domain) {
+                return res.status(400).json({ success: false, error: 'Неверный формат email' });
+            }
+
+            const response = await axios.get(currentAPI.baseUrl, {
+                params: {
+                    action: 'getMessages',
+                    login: username,
+                    domain: domain
+                },
+                timeout: 15000
+            });
+            messages = response.data || [];
         }
 
-        console.log(`📬 Проверка писем для: ${email}`);
+        console.log(`📩 Найдено писем: ${Array.isArray(messages) ? messages.length : 'Ошибка (не массив)'}`);
 
-        // Запрос к 1secmail API
-        const response = await axios.get(currentAPI.baseUrl, {
-            params: {
-                action: 'getMessages',
-                login: username,
-                domain: domain
-            },
-            timeout: 15000 // Увеличено время ожидания
-        });
-
-        const messages = response.data || [];
-
-        console.log(`📩 Найдено писем: ${messages.length}`);
+        if (!Array.isArray(messages)) {
+            console.log('⚠️ Warning: messages is not an array:', messages);
+            messages = [];
+        }
 
         if (messages.length > 0) {
             console.log('   Письма:');
@@ -179,14 +369,28 @@ app.get('/api/get-messages', async (req, res) => {
         }
 
         // Форматируем сообщения
-        const formattedMessages = messages.map(msg => ({
-            id: msg.id,
-            from: msg.from,
-            subject: msg.subject || '(Без темы)',
-            date: msg.date,
-            body: msg.textBody || msg.body || '',
-            textBody: msg.textBody || msg.body || ''
-        }));
+        const formattedMessages = messages.map((msg, index) => {
+            // Улучшенная генерация ID
+            let uniqueId = msg.id || msg._id;
+            if (!uniqueId) {
+                // Если нет ID, генерируем на основе контента и времени
+                // Убираем index из хэша, чтобы ID был стабильным при изменении порядка сортировки
+                // Но добавляем часть body, чтобы различать одинаковые письма
+                const bodyPart = (msg.body || msg.textBody || msg.htmlBody || '').substring(0, 20);
+                const uniqueStr = `${msg.subject || ''}${msg.date || ''}${msg.from ? (msg.from.address || msg.from) : ''}${bodyPart}`;
+                uniqueId = Buffer.from(uniqueStr).toString('base64');
+            }
+
+            return {
+                id: uniqueId,
+                from: msg.from.address ? `${msg.from.name} <${msg.from.address}>` : (msg.from || 'Неизвестно'),
+                subject: msg.subject || '(Без темы)',
+                date: msg.date || new Date().toISOString(),
+                body: msg.body || msg.textBody || msg.htmlBody || '',
+                textBody: msg.body || msg.textBody || '',
+                htmlBody: msg.htmlBody || msg.body || ''
+            };
+        });
 
         res.json({
             success: true,
@@ -228,7 +432,7 @@ app.get('/api/get-messages', async (req, res) => {
  */
 app.get('/api/read-message', async (req, res) => {
     try {
-        const { email, id } = req.query;
+        const { email, id, token, api } = req.query; // Добавляем api
 
         if (!email || !id) {
             return res.status(400).json({
@@ -240,19 +444,75 @@ app.get('/api/read-message', async (req, res) => {
         const [username, domain] = email.split('@');
 
         console.log(`📖 Чтение письма ID ${id} для: ${email}`);
+        
+        let message = null;
+        
+        // Определяем API
+        let targetAPI = currentAPI.name;
+        
+        // Более точное определение API по домену или токену
+        if (token && (email.includes('virgilian.com') || email.includes('mail.tm'))) {
+            targetAPI = 'mail.tm';
+        } else if (token && (email.includes('tempmail.lol') || email.includes('chessgamingworld.com') || email.includes('leadharbor.org'))) {
+             targetAPI = 'tempmail.lol';
+        } else if (api) {
+            targetAPI = api;
+        } else if (token && !email.includes('virgilian') && !email.includes('mail.tm')) {
+             targetAPI = 'tempmail.lol';
+        } else {
+             targetAPI = '1secmail';
+        }
 
-        // Запрос к 1secmail API
-        const response = await axios.get(currentAPI.baseUrl, {
-            params: {
-                action: 'readMessage',
-                login: username,
-                domain: domain,
-                id: id
-            },
-            timeout: 15000
-        });
+        if (targetAPI === 'mail.tm') {
+            if (!token) return res.status(400).json({ success: false, error: 'Токен не указан' });
+            
+            try {
+                const response = await axios.get(`${EMAIL_APIS.mailtm.baseUrl}/messages/${id}`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                    timeout: 15000
+                });
+                message = response.data;
+                // Нормализация
+                message.htmlBody = message.html ? message.html[0] : (message.text ? `<pre>${message.text}</pre>` : '');
+                message.textBody = message.text || '';
+                message.from = message.from.address ? `${message.from.name} <${message.from.address}>` : message.from;
+            } catch (e) {
+                throw new Error('Письмо не найдено в mail.tm');
+            }
 
-        const message = response.data;
+        } else if (targetAPI === 'tempmail.lol') {
+             if (!token) {
+                  return res.status(400).json({ success: false, error: 'Токен не указан' });
+             }
+             // Для tempmail.lol получаем все письма и ищем нужное
+             const response = await axios.get(`${EMAIL_APIS.tempmail.baseUrl}/auth/${token}`, {
+                timeout: 15000
+             });
+             const messages = response.data.email || [];
+             // Ищем письмо. ID может быть строкой или числом
+             message = messages.find(m => (m._id || m.id) == id);
+             
+             if (!message) {
+                 throw new Error('Письмо не найдено');
+             }
+             
+             // Нормализуем структуру для tempmail.lol
+             message.htmlBody = message.htmlBody || message.body; 
+             message.textBody = message.textBody || message.body;
+
+        } else {
+            // Запрос к 1secmail API
+            const response = await axios.get(EMAIL_APIS.secmail.baseUrl, {
+                params: {
+                    action: 'readMessage',
+                    login: username,
+                    domain: domain,
+                    id: id
+                },
+                timeout: 15000
+            });
+            message = response.data;
+        }
 
         if (!message) {
             throw new Error('Письмо не найдено');
