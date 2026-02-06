@@ -1,14 +1,13 @@
 // script.js - Полная логика для DropWin Mail с управлением несколькими почтами
 
 // ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-const API_BASE = 'http://localhost:3001/api';
-const REFRESH_INTERVAL = 15000;
+const API_BASE = 'http://localhost:3000/api';
+const REFRESH_INTERVAL = 5000; // 5 секунд
 const STORAGE_KEY = 'dropwin_emails';
 
 let emails = []; // Массив всех созданных почт
 let currentEmail = null; // Текущая активная почта
 let refreshInterval = null;
-let lastSoundTime = 0;
 
 // ========== DOM ЭЛЕМЕНТЫ ==========
 const createNewEmailBtn = document.getElementById('createNewEmailBtn');
@@ -35,7 +34,7 @@ const modalBody = document.getElementById('modalBody');
 document.addEventListener('DOMContentLoaded', () => {
     loadEmailsFromStorage();
     setupEventListeners();
-    
+
     if (emails.length > 0) {
         renderEmailsList();
         selectEmail(emails[0]);
@@ -52,7 +51,7 @@ function setupEventListeners() {
     refreshEmailBtn.addEventListener('click', manualRefresh);
     deleteEmailBtn.addEventListener('click', deleteCurrentEmail);
     closeModalBtn.addEventListener('click', closeModal);
-    
+
     messageModal.addEventListener('click', (e) => {
         if (e.target === messageModal || e.target.classList.contains('modal-overlay')) {
             closeModal();
@@ -86,33 +85,88 @@ async function createNewEmail() {
     try {
         // Показываем загрузку
         showLoadingButton(createNewEmailBtn);
-        
+
         const response = await fetch(`${API_BASE}/generate-email`);
+
+        // Проверяем статус ответа
+        if (!response.ok) {
+            let errorMessage = 'Ошибка сервера';
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.error || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
+        }
+
         const data = await response.json();
-        
-        if (data.success) {
+
+        if (!data.success) {
+            throw new Error(data.error || 'Не удалось создать почту');
+        }
+
+        // Если сервер не возвращает email, создаем его локально
+        let emailAddress;
+        if (data.email) {
+            emailAddress = data.email;
+        } else {
+            // Генерируем временный email на клиенте
+            const randomString = Math.random().toString(36).substring(2, 10);
+            const timestamp = Date.now().toString(36);
+            emailAddress = `temp_${randomString}_${timestamp}@dropwin.dev`;
+        }
+
+        const newEmail = {
+            address: emailAddress,
+            username: data.username || emailAddress.split('@')[0],
+            domain: data.domain || 'dropwin.dev',
+            createdAt: new Date().toISOString(),
+            messagesCount: 0,
+            isLocal: !data.email // Флаг, что email создан локально
+        };
+
+        emails.unshift(newEmail); // Добавляем в начало массива
+        saveEmailsToStorage();
+        renderEmailsList();
+        selectEmail(newEmail);
+
+        if (newEmail.isLocal) {
+            showToast('Почта создана локально (сервер недоступен)', 'warning');
+        } else {
+            showToast('Почта создана успешно!', 'success');
+        }
+
+    } catch (error) {
+        console.error('Ошибка создания почты:', error);
+
+        // Если сервер недоступен, создаем временную почту локально
+        if (error.message.includes('NetworkError') ||
+            error.message.includes('Failed to fetch') ||
+            error.message.includes('HTTP 5')) {
+
+            const randomString = Math.random().toString(36).substring(2, 10);
+            const timestamp = Date.now().toString(36);
+            const localEmailAddress = `local_${randomString}_${timestamp}@temp.dropwin`;
+
             const newEmail = {
-                address: data.email,
-                username: data.username,
-                domain: data.domain,
-                token: data.token,
-                api: data.api, // Сохраняем тип API
+                address: localEmailAddress,
+                username: localEmailAddress.split('@')[0],
+                domain: 'temp.dropwin',
                 createdAt: new Date().toISOString(),
-                messagesCount: 0
+                messagesCount: 0,
+                isLocal: true
             };
-            
-            emails.unshift(newEmail); // Добавляем в начало массива
+
+            emails.unshift(newEmail);
             saveEmailsToStorage();
             renderEmailsList();
             selectEmail(newEmail);
-            
-            showToast('Почта создана успешно!', 'success');
+
+            showToast('Сервер недоступен. Создана локальная почта', 'warning');
         } else {
-            throw new Error(data.error || 'Не удалось создать почту');
+            showToast(`Ошибка: ${error.message}`, 'error');
         }
-    } catch (error) {
-        console.error('Ошибка создания почты:', error);
-        showToast('Ошибка создания почты', 'error');
     } finally {
         restoreButton(createNewEmailBtn);
     }
@@ -121,7 +175,7 @@ async function createNewEmail() {
 // ========== ОТОБРАЖЕНИЕ СПИСКА ПОЧТ ==========
 function renderEmailsList() {
     emailsCount.textContent = emails.length;
-    
+
     if (emails.length === 0) {
         emailsList.innerHTML = `
             <div class="empty-emails-state">
@@ -135,20 +189,23 @@ function renderEmailsList() {
         `;
         return;
     }
-    
+
     const html = emails.map(email => `
         <div class="email-item ${currentEmail && currentEmail.address === email.address ? 'active' : ''}" 
              data-email="${escapeHtml(email.address)}">
-            <div class="email-item-text">${escapeHtml(email.address)}</div>
+            <div class="email-item-text">
+                ${escapeHtml(email.address)}
+                ${email.isLocal ? '<span class="local-badge">локальная</span>' : ''}
+            </div>
             <div class="email-item-info">
                 <span>${formatRelativeTime(email.createdAt)}</span>
                 ${email.messagesCount > 0 ? `<span class="email-item-badge">${email.messagesCount}</span>` : ''}
             </div>
         </div>
     `).join('');
-    
+
     emailsList.innerHTML = html;
-    
+
     // Добавляем обработчики клика
     document.querySelectorAll('.email-item').forEach(item => {
         item.addEventListener('click', () => {
@@ -164,27 +221,33 @@ function renderEmailsList() {
 // ========== ВЫБОР АКТИВНОЙ ПОЧТЫ ==========
 function selectEmail(email) {
     currentEmail = email;
-    
+
     // Обновляем UI
     noEmailSelected.classList.add('hidden');
     emailContent.classList.remove('hidden');
     currentEmailText.textContent = email.address;
-    
+
     // Обновляем список почт
     renderEmailsList();
-    
+
     // Останавливаем предыдущее автообновление
     if (refreshInterval) {
         clearInterval(refreshInterval);
     }
-    
-    // Загружаем письма
-    fetchMessages();
-    
-    // Запускаем автообновление
-    refreshInterval = setInterval(() => {
+
+    // Загружаем письма (только для не локальных почт)
+    if (!email.isLocal) {
         fetchMessages();
-    }, REFRESH_INTERVAL);
+
+        // Запускаем автообновление
+        refreshInterval = setInterval(() => {
+            fetchMessages();
+        }, REFRESH_INTERVAL);
+    } else {
+        // Для локальных почт показываем сообщение
+        messagesCount.textContent = '0 писем (локальная почта)';
+        displayMessages([]);
+    }
 }
 
 // ========== СОСТОЯНИЕ "НЕТ ПОЧТЫ" ==========
@@ -192,7 +255,7 @@ function showNoEmailState() {
     noEmailSelected.classList.remove('hidden');
     emailContent.classList.add('hidden');
     currentEmail = null;
-    
+
     if (refreshInterval) {
         clearInterval(refreshInterval);
         refreshInterval = null;
@@ -201,95 +264,36 @@ function showNoEmailState() {
 
 // ========== ПОЛУЧЕНИЕ ПИСЕМ ==========
 async function fetchMessages() {
-    if (!currentEmail) return;
-    
-    // Сразу показываем сохраненные письма, если есть
-    if (currentEmail.messages && currentEmail.messages.length > 0) {
-        displayMessages(currentEmail.messages);
-        messagesCount.textContent = `${currentEmail.messages.length} ${getMessageWord(currentEmail.messages.length)}`;
-    }
+    if (!currentEmail || currentEmail.isLocal) return;
 
     try {
-        let url = `${API_BASE}/get-messages?email=${encodeURIComponent(currentEmail.address)}`;
-        if (currentEmail.token) {
-            url += `&token=${encodeURIComponent(currentEmail.token)}`;
-        }
-        if (currentEmail.api) {
-            url += `&api=${encodeURIComponent(currentEmail.api)}`;
+        const response = await fetch(
+            `${API_BASE}/get-messages?email=${encodeURIComponent(currentEmail.address)}`
+        );
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        const response = await fetch(url);
         const data = await response.json();
-        
+
         if (data.success) {
             const messages = data.messages || [];
-            const prevIds = new Set((currentEmail.messages || []).map(m => m.id));
-            const newCount = messages.filter(m => !prevIds.has(m.id)).length;
-            if (newCount > 0 && Date.now() - lastSoundTime > 2000) {
-                try {
-                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                    const o = ctx.createOscillator();
-                    const g = ctx.createGain();
-                    o.type = 'sine';
-                    o.frequency.setValueAtTime(880, ctx.currentTime);
-                    g.gain.setValueAtTime(0, ctx.currentTime);
-                    g.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.02);
-                    g.gain.exponentialRampToValueAtTime(0.00001, ctx.currentTime + 0.35);
-                    o.connect(g);
-                    g.connect(ctx.destination);
-                    o.start();
-                    o.stop(ctx.currentTime + 0.35);
-                } catch (e) {}
-                lastSoundTime = Date.now();
-                showToast('Новое письмо', 'success');
-            }
-            
-            // Если сервер вернул пустой список, но у нас уже были письма
-            // Это может быть ошибкой, если мы не ожидаем удаления
-            // Но в mail.tm письма хранятся на сервере, так что если сервер вернул [], значит их нет.
-            // Однако, чтобы избежать мерцания при сбоях, мы можем проверять messages.length
-            
-            // MERGE logic: обновляем существующие, добавляем новые
-            if (currentEmail.messages && currentEmail.messages.length > 0) {
-                 const mergedMessages = [...currentEmail.messages];
-                 
-                 messages.forEach(newMsg => {
-                     const existingIdx = mergedMessages.findIndex(m => m.id === newMsg.id);
-                     if (existingIdx !== -1) {
-                         // Обновляем (например, если появилось тело письма)
-                         mergedMessages[existingIdx] = { ...mergedMessages[existingIdx], ...newMsg };
-                     } else {
-                         // Добавляем новое
-                         mergedMessages.push(newMsg);
-                     }
-                 });
-                 
-                 // Если сервер вернул полный список, мы должны удалить те, которых нет на сервере?
-                 // Для надежности лучше доверять серверу, если он вернул success: true
-                 // Но если API глючит и возвращает пустой список...
-                 
-                 // ИСПОЛЬЗУЕМ mergedMessages ВМЕСТО ПЕРЕЗАПИСИ
-                 if (mergedMessages.length > 0) {
-                     currentEmail.messages = mergedMessages;
-                 } else if (messages.length > 0) {
-                     currentEmail.messages = messages;
-                 }
-                 // Если и там и там пусто, то ничего не делаем (или очищаем, если нужно)
-            } else {
-                currentEmail.messages = messages;
-            }
 
-            currentEmail.messagesCount = currentEmail.messages.length;
-            
-            saveEmailsToStorage(); // Сохраняем в localStorage
+            // Обновляем счетчик писем
+            currentEmail.messagesCount = messages.length;
+            saveEmailsToStorage();
             renderEmailsList();
-            
-            messagesCount.textContent = `${currentEmail.messages.length} ${getMessageWord(currentEmail.messages.length)}`;
-            
-            displayMessages(currentEmail.messages);
+
+            messagesCount.textContent = `${messages.length} ${getMessageWord(messages.length)}`;
+
+            displayMessages(messages);
+        } else {
+            throw new Error(data.error || 'Ошибка получения писем');
         }
     } catch (error) {
         console.error('Ошибка получения писем:', error);
+        // Не показываем ошибку пользователю для обычных запросов автообновления
     }
 }
 
@@ -309,16 +313,10 @@ function displayMessages(messages) {
         `;
         return;
     }
-    
-    messages.sort((a, b) => {
-        const da = new Date(a.date || 0).getTime();
-        const db = new Date(b.date || 0).getTime();
-        if (db !== da) return db - da;
-        const ia = String(a.id);
-        const ib = String(b.id);
-        return ib.localeCompare(ia);
-    });
-    
+
+    // Сортируем по дате (новые сверху)
+    messages.sort((a, b) => b.id - a.id);
+
     const html = messages.map(msg => `
         <div class="message-item" data-id="${msg.id}">
             <div class="message-header">
@@ -328,9 +326,9 @@ function displayMessages(messages) {
             <div class="message-from">От: ${escapeHtml(msg.from)}</div>
         </div>
     `).join('');
-    
+
     messagesList.innerHTML = html;
-    
+
     // Добавляем обработчики
     document.querySelectorAll('.message-item').forEach(item => {
         item.addEventListener('click', () => {
@@ -342,63 +340,42 @@ function displayMessages(messages) {
 
 // ========== ОТКРЫТИЕ ПИСЬМА ==========
 async function openMessage(messageId) {
-    // Сначала ищем в сохраненных
-    if (currentEmail.messages) {
-        const savedMsg = currentEmail.messages.find(m => m.id == messageId);
-        if (savedMsg && (savedMsg.htmlBody || savedMsg.textBody)) {
-             // Если есть полное тело письма, открываем сразу
-             showModal(savedMsg);
-             // Но все равно можно подгрузить актуальное (опционально)
-             return; 
-        }
-    }
+    if (!currentEmail || currentEmail.isLocal) return;
 
     try {
-        let url = `${API_BASE}/read-message?email=${encodeURIComponent(currentEmail.address)}&id=${messageId}`;
-        if (currentEmail.token) {
-            url += `&token=${encodeURIComponent(currentEmail.token)}`;
-        }
-        if (currentEmail.api) {
-            url += `&api=${encodeURIComponent(currentEmail.api)}`;
+        const response = await fetch(
+            `${API_BASE}/read-message?email=${encodeURIComponent(currentEmail.address)}&id=${messageId}`
+        );
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        const response = await fetch(url);
         const data = await response.json();
-        
+
         if (data.success && data.message) {
             const msg = data.message;
-            
-            // Обновляем сохраненное письмо полными данными
-            if (currentEmail.messages) {
-                const idx = currentEmail.messages.findIndex(m => m.id == messageId);
-                if (idx !== -1) {
-                    currentEmail.messages[idx] = { ...currentEmail.messages[idx], ...msg };
-                    saveEmailsToStorage();
-                }
+
+            modalSubject.textContent = msg.subject || '(Без темы)';
+            modalFrom.textContent = msg.from;
+            modalDate.textContent = formatDate(msg.date);
+
+            if (msg.htmlBody) {
+                modalBody.innerHTML = msg.htmlBody;
+            } else if (msg.textBody) {
+                modalBody.textContent = msg.textBody;
+            } else {
+                modalBody.textContent = '(Пустое письмо)';
             }
 
-            showModal(msg);
+            messageModal.classList.remove('hidden');
+        } else {
+            throw new Error(data.error || 'Ошибка открытия письма');
         }
     } catch (error) {
         console.error('Ошибка открытия письма:', error);
         showToast('Не удалось открыть письмо', 'error');
     }
-}
-
-function showModal(msg) {
-    modalSubject.textContent = msg.subject || '(Без темы)';
-    modalFrom.textContent = msg.from;
-    modalDate.textContent = formatDate(msg.date);
-    
-    if (msg.htmlBody) {
-        modalBody.innerHTML = msg.htmlBody;
-    } else if (msg.textBody) {
-        modalBody.textContent = msg.textBody;
-    } else {
-        modalBody.textContent = '(Пустое письмо)';
-    }
-    
-    messageModal.classList.remove('hidden');
 }
 
 // ========== ЗАКРЫТИЕ МОДАЛЬНОГО ОКНА ==========
@@ -409,7 +386,7 @@ function closeModal() {
 // ========== КОПИРОВАНИЕ В БУФЕР ОБМЕНА ==========
 async function copyToClipboard() {
     if (!currentEmail) return;
-    
+
     try {
         await navigator.clipboard.writeText(currentEmail.address);
         showToast('Email скопирован!', 'success');
@@ -421,25 +398,28 @@ async function copyToClipboard() {
         textArea.style.opacity = '0';
         document.body.appendChild(textArea);
         textArea.select();
-        
+
         try {
             document.execCommand('copy');
             showToast('Email скопирован!', 'success');
         } catch (err) {
             showToast('Ошибка копирования', 'error');
         }
-        
+
         document.body.removeChild(textArea);
     }
 }
 
 // ========== РУЧНОЕ ОБНОВЛЕНИЕ ==========
 async function manualRefresh() {
-    if (!currentEmail) return;
-    
+    if (!currentEmail || currentEmail.isLocal) {
+        showToast('Локальная почта не поддерживает получение писем', 'warning');
+        return;
+    }
+
     showLoadingButton(refreshEmailBtn, true);
     await fetchMessages();
-    
+
     setTimeout(() => {
         restoreButton(refreshEmailBtn, true);
     }, 500);
@@ -448,15 +428,15 @@ async function manualRefresh() {
 // ========== УДАЛЕНИЕ ПОЧТЫ ==========
 function deleteCurrentEmail() {
     if (!currentEmail) return;
-    
+
     if (!confirm(`Удалить почту ${currentEmail.address}?`)) {
         return;
     }
-    
+
     // Удаляем из массива
     emails = emails.filter(e => e.address !== currentEmail.address);
     saveEmailsToStorage();
-    
+
     // Обновляем UI
     if (emails.length > 0) {
         renderEmailsList();
@@ -465,7 +445,7 @@ function deleteCurrentEmail() {
         renderEmailsList();
         showNoEmailState();
     }
-    
+
     showToast('Почта удалена', 'success');
 }
 
@@ -473,9 +453,10 @@ function deleteCurrentEmail() {
 
 function showToast(message, type = 'success') {
     copyNotification.textContent = message;
-    copyNotification.style.background = type === 'success' ? 'var(--success)' : 'var(--error)';
+    copyNotification.style.background = type === 'success' ? 'var(--success)' :
+                                      type === 'warning' ? 'var(--warning)' : 'var(--error)';
     copyNotification.classList.remove('hidden');
-    
+
     setTimeout(() => {
         copyNotification.classList.add('hidden');
     }, 2000);
@@ -526,19 +507,19 @@ function formatDate(dateString) {
     const date = new Date(dateString);
     const now = new Date();
     const diff = now - date;
-    
+
     if (diff < 60000) return 'Только что';
     if (diff < 3600000) return `${Math.floor(diff / 60000)} мин. назад`;
     if (date.toDateString() === now.toDateString()) {
         return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     }
-    
+
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     if (date.toDateString() === yesterday.toDateString()) {
         return 'Вчера, ' + date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     }
-    
+
     return date.toLocaleString('ru-RU', {
         day: '2-digit',
         month: '2-digit',
@@ -552,16 +533,16 @@ function formatRelativeTime(isoString) {
     const date = new Date(isoString);
     const now = new Date();
     const diff = now - date;
-    
+
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     const days = Math.floor(diff / 86400000);
-    
+
     if (minutes < 1) return 'Только что';
     if (minutes < 60) return `${minutes} мин. назад`;
     if (hours < 24) return `${hours} ч. назад`;
     if (days < 7) return `${days} д. назад`;
-    
+
     return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 }
 
@@ -577,11 +558,27 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Добавляем CSS для анимации вращения
+// Добавляем CSS для анимации вращения и дополнительные стили
 const style = document.createElement('style');
 style.textContent = `
     @keyframes spin {
         to { transform: rotate(360deg); }
+    }
+    
+    .local-badge {
+        display: inline-block;
+        background: var(--warning);
+        color: black;
+        font-size: 0.7rem;
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-left: 8px;
+        font-weight: 600;
+    }
+    
+    .email-item.active .local-badge {
+        background: rgba(255, 255, 255, 0.3);
+        color: white;
     }
 `;
 document.head.appendChild(style);

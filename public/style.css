@@ -18,7 +18,6 @@
     --accent-primary: #667eea;
     --accent-secondary: #764ba2;
     --accent-hover: #5568d3;
-    --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     
     /* Текст */
     --text-primary: #e4e4e7;
@@ -43,12 +42,6 @@ body {
     overflow: hidden;
 }
 
-/* Анимация появления */
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
 /* ========== ГЛАВНЫЙ КОНТЕЙНЕР ========== */
 .app-container {
     display: grid;
@@ -64,8 +57,6 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
-    z-index: 10;
 }
 
 .sidebar-header {
@@ -74,8 +65,6 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(26, 26, 46, 0.95);
-    backdrop-filter: blur(10px);
 }
 
 .logo {
@@ -85,36 +74,28 @@ body {
 }
 
 .logo h1 {
-    font-size: 1.5rem;
-    font-weight: 800;
-    background: var(--accent-gradient);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    letter-spacing: -0.5px;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text-primary);
 }
 
 .create-new-btn {
-    background: var(--accent-gradient);
+    background: var(--accent-primary);
     color: white;
     border: none;
-    width: 40px;
-    height: 40px;
-    border-radius: 12px;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 4px 12px rgba(118, 75, 162, 0.3);
+    transition: all 0.2s;
 }
 
 .create-new-btn:hover {
-    transform: translateY(-2px) scale(1.05);
-    box-shadow: 0 8px 16px rgba(118, 75, 162, 0.4);
-}
-
-.create-new-btn:active {
-    transform: translateY(0) scale(0.95);
+    background: var(--accent-hover);
+    transform: scale(1.05);
 }
 
 /* Список созданных почт */
@@ -201,53 +182,61 @@ body {
 
 /* Элемент почты в списке */
 .email-item {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 8px;
     cursor: pointer;
     transition: all 0.2s;
     position: relative;
-    overflow: hidden;
 }
 
 .email-item:hover {
     background: var(--bg-hover);
+    border-color: var(--border-secondary);
 }
 
 .email-item.active {
-    background: rgba(102, 126, 234, 0.1);
-    border-left: 3px solid #667eea;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    border-color: var(--accent-primary);
 }
 
 .email-item-text {
+    font-size: 0.85rem;
     font-weight: 500;
+    word-break: break-all;
+    color: var(--text-primary);
     margin-bottom: 6px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 0.95rem;
+}
+
+.email-item.active .email-item-text {
+    color: white;
 }
 
 .email-item-info {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.email-item.active .email-item-info {
+    color: rgba(255, 255, 255, 0.8);
 }
 
 .email-item-badge {
-    background: var(--accent-gradient);
+    background: var(--accent-primary);
     color: white;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 8px;
+    font-size: 0.7rem;
     font-weight: 600;
-    box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
 }
 
-/* Анимация для новых писем */
-.message-item {
-    animation: none;
+.email-item.active .email-item-badge {
+    background: rgba(255, 255, 255, 0.2);
 }
 
 /* ========== ОСНОВНОЙ КОНТЕНТ ========== */
@@ -523,7 +512,7 @@ body {
 .message-item:hover {
     background: var(--bg-hover);
     border-color: var(--accent-primary);
-    transform: none;
+    transform: translateX(4px);
 }
 
 .message-header {

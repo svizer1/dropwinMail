@@ -1,156 +1,472 @@
-# 📧 DropWin Mail v2.1 - ИСПРАВЛЕНО!
+// script.js - Полная логика для DropWin Mail с управлением несколькими почтами
 
-Временная почта с **РЕАЛЬНЫМИ** email адресами и письмами!
+// ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+const API_BASE = 'http://localhost:3000/api';
+const REFRESH_INTERVAL = 5000; // 5 секунд
+const STORAGE_KEY = 'dropwin_emails';
 
-## ✨ Что нового в v2.1
+let emails = []; // Массив всех созданных почт
+let currentEmail = null; // Текущая активная почта
+let refreshInterval = null;
 
-- ✅ **НАСТОЯЩИЕ временные почты** через API 1secmail.com
-- ✅ **РЕАЛЬНЫЕ письма** - отправляйте письма и они ДЕЙСТВИТЕЛЬНО приходят!
-- ✅ Автообновление каждые 3 секунды
-- ✅ Красивые имена: `quickmail4582@1secmail.com`, `dropwin7823@kzccv.com`
-- ✅ Поддержка HTML писем
-- ✅ Просмотр вложений
+// ========== DOM ЭЛЕМЕНТЫ ==========
+const createNewEmailBtn = document.getElementById('createNewEmailBtn');
+const createFirstEmailBtn = document.getElementById('createFirstEmailBtn');
+const noEmailSelected = document.getElementById('noEmailSelected');
+const emailContent = document.getElementById('emailContent');
+const emailsList = document.getElementById('emailsList');
+const emailsCount = document.getElementById('emailsCount');
+const currentEmailText = document.getElementById('currentEmailText');
+const copyEmailBtn = document.getElementById('copyEmailBtn');
+const refreshEmailBtn = document.getElementById('refreshEmailBtn');
+const deleteEmailBtn = document.getElementById('deleteEmailBtn');
+const copyNotification = document.getElementById('copyNotification');
+const messagesCount = document.getElementById('messagesCount');
+const messagesList = document.getElementById('messagesList');
+const messageModal = document.getElementById('messageModal');
+const closeModalBtn = document.getElementById('closeModalBtn');
+const modalSubject = document.getElementById('modalSubject');
+const modalFrom = document.getElementById('modalFrom');
+const modalDate = document.getElementById('modalDate');
+const modalBody = document.getElementById('modalBody');
 
-## 🚀 Быстрый старт
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
+document.addEventListener('DOMContentLoaded', async () => {
+    // Проверяем доступность сервера
+    try {
+        const response = await fetch(`${API_BASE}/generate-email`, { method: 'HEAD' });
+        if (!response.ok) {
+            console.warn('Сервер может быть недоступен');
+            showToast('Предупреждение: Сервер может быть недоступен', 'error');
+        }
+    } catch (error) {
+        console.error('Сервер недоступен:', error);
+        showToast('Ошибка: Сервер недоступен. Убедитесь, что сервер запущен.', 'error');
+    }
 
-### Шаг 1: Установка зависимостей
+    loadEmailsFromStorage();
+    setupEventListeners();
+    
+    if (emails.length > 0) {
+        renderEmailsList();
+        selectEmail(emails[0]);
+    } else {
+        showNoEmailState();
+    }
+});
 
-```bash
-npm install
-```
+// ========== ОБРАБОТЧИКИ СОБЫТИЙ ==========
+function setupEventListeners() {
+    createNewEmailBtn.addEventListener('click', createNewEmail);
+    createFirstEmailBtn.addEventListener('click', createNewEmail);
+    copyEmailBtn.addEventListener('click', copyToClipboard);
+    refreshEmailBtn.addEventListener('click', manualRefresh);
+    deleteEmailBtn.addEventListener('click', deleteCurrentEmail);
+    closeModalBtn.addEventListener('click', closeModal);
+    
+    messageModal.addEventListener('click', (e) => {
+        if (e.target === messageModal || e.target.classList.contains('modal-overlay')) {
+            closeModal();
+        }
+    });
+}
 
-### Шаг 2: Запуск сервера
+// ========== СОЗДАНИЕ НОВОЙ ПОЧТЫ ==========
+async function createNewEmail() {
+    try {
+        // Показываем загрузку
+        showLoadingButton(createNewEmailBtn);
+        
+        const response = await fetch(`${API_BASE}/generate-email`);
+        const data = await response.json();
 
-```bash
-npm start
-```
+        if (data.success) {
+            const newEmail = {
+                address: data.email,
+                username: data.username,
+                domain: data.domain,
+                createdAt: new Date().toISOString(),
+                messagesCount: 0
+            };
+            
+            emails.unshift(newEmail); // Добавляем в начало массива
+            saveEmailsToStorage();
+            renderEmailsList();
+            selectEmail(newEmail);
+            
+            showToast('Почта создана успешно!', 'success');
+        } else {
+            throw new Error(data.error || 'Не удалось создать почту');
+        }
+    } catch (error) {
+        console.error('Ошибка создания почты:', error);
+        showToast('Ошибка создания почты', 'error');
+    } finally {
+        restoreButton(createNewEmailBtn);
+    }
+}
 
-### Шаг 3: Откройте браузер
+// ========== ОТОБРАЖЕНИЕ СПИСКА ПОЧТ ==========
+function renderEmailsList() {
+    emailsCount.textContent = emails.length;
+    
+    if (emails.length === 0) {
+        emailsList.innerHTML = `
+            <div class="empty-emails-state">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                    <circle cx="24" cy="24" r="22" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+                    <path d="M24 16V24M24 28V28.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <p>Нет созданных почт</p>
+                <span>Создайте первую почту</span>
+            </div>
+        `;
+        return;
+    }
+    
+    const html = emails.map(email => `
+        <div class="email-item ${currentEmail && currentEmail.address === email.address ? 'active' : ''}" 
+             data-email="${escapeHtml(email.address)}">
+            <div class="email-item-text">${escapeHtml(email.address)}</div>
+            <div class="email-item-info">
+                <span>${formatRelativeTime(email.createdAt)}</span>
+                ${email.messagesCount > 0 ? `<span class="email-item-badge">${email.messagesCount}</span>` : ''}
+            </div>
+        </div>
+    `).join('');
+    
+    emailsList.innerHTML = html;
+    
+    // Добавляем обработчики клика
+    document.querySelectorAll('.email-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const emailAddress = item.getAttribute('data-email');
+            const email = emails.find(e => e.address === emailAddress);
+            if (email) {
+                selectEmail(email);
+            }
+        });
+    });
+}
 
-Перейдите по адресу: **http://localhost:3000**
+// ========== ВЫБОР АКТИВНОЙ ПОЧТЫ ==========
+function selectEmail(email) {
+    currentEmail = email;
+    
+    // Обновляем UI
+    noEmailSelected.classList.add('hidden');
+    emailContent.classList.remove('hidden');
+    currentEmailText.textContent = email.address;
+    
+    // Обновляем список почт
+    renderEmailsList();
+    
+    // Останавливаем предыдущее автообновление
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+    }
+    
+    // Загружаем письма
+    fetchMessages();
+    
+    // Запускаем автообновление
+    refreshInterval = setInterval(() => {
+        fetchMessages();
+    }, REFRESH_INTERVAL);
+}
 
-## 📧 Как проверить что почта работает
+// ========== СОСТОЯНИЕ "НЕТ ПОЧТЫ" ==========
+function showNoEmailState() {
+    noEmailSelected.classList.remove('hidden');
+    emailContent.classList.add('hidden');
+    currentEmail = null;
+    
+    if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+    }
+}
 
-1. **Создайте почту** - нажмите кнопку "+"
-2. **Скопируйте адрес** - например: `quickmail4582@1secmail.com`
-3. **Отправьте письмо** с Gmail/Outlook/Yahoo на этот адрес:
-   - Кому: `quickmail4582@1secmail.com`
-   - Тема: `Тест DropWin Mail`
-   - Сообщение: `Проверка реальной почты!`
-4. **Ждите 10-30 секунд** - письмо автоматически появится!
+// ========== ПОЛУЧЕНИЕ ПИСЕМ ==========
+async function fetchMessages() {
+    if (!currentEmail) return;
+    
+    try {
+        const response = await fetch(
+            `${API_BASE}/get-messages?email=${encodeURIComponent(currentEmail.address)}`
+        );
+        const data = await response.json();
+        
+        if (data.success) {
+            const messages = data.messages || [];
+            
+            // Обновляем счетчик писем
+            currentEmail.messagesCount = messages.length;
+            saveEmailsToStorage();
+            renderEmailsList();
+            
+            messagesCount.textContent = `${messages.length} ${getMessageWord(messages.length)}`;
+            
+            displayMessages(messages);
+        }
+    } catch (error) {
+        console.error('Ошибка получения писем:', error);
+    }
+}
 
-## 🎯 Используемые домены
+// ========== ОТОБРАЖЕНИЕ ПИСЕМ ==========
+function displayMessages(messages) {
+    if (!messages || messages.length === 0) {
+        messagesList.innerHTML = `
+            <div class="empty-messages-state">
+                <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+                    <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="2" opacity="0.2"/>
+                    <path d="M20 28L32 36L44 28" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity="0.3"/>
+                    <rect x="18" y="24" width="28" height="20" rx="2" stroke="currentColor" stroke-width="2.5" opacity="0.3"/>
+                </svg>
+                <p>Нет входящих писем</p>
+                <span>Отправьте письмо на этот адрес, и оно появится здесь автоматически</span>
+            </div>
+        `;
+        return;
+    }
+    
+    // Сортируем по дате (новые сверху)
+    messages.sort((a, b) => b.id - a.id);
+    
+    const html = messages.map(msg => `
+        <div class="message-item" data-id="${msg.id}">
+            <div class="message-header">
+                <div class="message-subject">${escapeHtml(msg.subject || '(Без темы)')}</div>
+                <div class="message-date">${formatDate(msg.date)}</div>
+            </div>
+            <div class="message-from">От: ${escapeHtml(msg.from)}</div>
+        </div>
+    `).join('');
+    
+    messagesList.innerHTML = html;
+    
+    // Добавляем обработчики
+    document.querySelectorAll('.message-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const messageId = item.getAttribute('data-id');
+            openMessage(messageId);
+        });
+    });
+}
 
-- `1secmail.com` ⭐ (основной)
-- `1secmail.org`
-- `1secmail.net`
-- `kzccv.com`
-- `qiott.com`
-- `wuuvo.com`
-- `icznn.com`
+// ========== ОТКРЫТИЕ ПИСЬМА ==========
+async function openMessage(messageId) {
+    try {
+        const response = await fetch(
+            `${API_BASE}/read-message?email=${encodeURIComponent(currentEmail.address)}&id=${messageId}`
+        );
+        const data = await response.json();
+        
+        if (data.success && data.message) {
+            const msg = data.message;
+            
+            modalSubject.textContent = msg.subject || '(Без темы)';
+            modalFrom.textContent = msg.from;
+            modalDate.textContent = formatDate(msg.date);
+            
+            if (msg.htmlBody) {
+                modalBody.innerHTML = msg.htmlBody;
+            } else if (msg.textBody) {
+                modalBody.textContent = msg.textBody;
+            } else {
+                modalBody.textContent = '(Пустое письмо)';
+            }
+            
+            messageModal.classList.remove('hidden');
+        }
+    } catch (error) {
+        console.error('Ошибка открытия письма:', error);
+        showToast('Не удалось открыть письмо', 'error');
+    }
+}
 
-## 💡 Особенности
+// ========== ЗАКРЫТИЕ МОДАЛЬНОГО ОКНА ==========
+function closeModal() {
+    messageModal.classList.add('hidden');
+}
 
-### ✅ Что работает:
-- Создание реальных временных email адресов
-- Получение писем из интернета
-- Автообновление входящих
-- Просмотр HTML и текстовых писем
-- Поддержка вложений
-- Сохранение нескольких почт
+// ========== КОПИРОВАНИЕ В БУФЕР ОБМЕНА ==========
+async function copyToClipboard() {
+    if (!currentEmail) return;
+    
+    try {
+        await navigator.clipboard.writeText(currentEmail.address);
+        showToast('Email скопирован!', 'success');
+    } catch (error) {
+        // Fallback для старых браузеров
+        const textArea = document.createElement('textarea');
+        textArea.value = currentEmail.address;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        
+        try {
+            document.execCommand('copy');
+            showToast('Email скопирован!', 'success');
+        } catch (err) {
+            showToast('Ошибка копирования', 'error');
+        }
+        
+        document.body.removeChild(textArea);
+    }
+}
 
-### ⚠️ Ограничения:
-- Письма хранятся ~60 минут
-- Нет паролей (любой может прочитать письма по адресу)
-- Используйте только для неважных регистраций
+// ========== РУЧНОЕ ОБНОВЛЕНИЕ ==========
+async function manualRefresh() {
+    if (!currentEmail) return;
+    
+    showLoadingButton(refreshEmailBtn, true);
+    await fetchMessages();
+    
+    setTimeout(() => {
+        restoreButton(refreshEmailBtn, true);
+    }, 500);
+}
 
-## 🔧 API Эндпоинты
+// ========== УДАЛЕНИЕ ПОЧТЫ ==========
+function deleteCurrentEmail() {
+    if (!currentEmail) return;
+    
+    if (!confirm(`Удалить почту ${currentEmail.address}?`)) {
+        return;
+    }
+    
+    // Удаляем из массива
+    emails = emails.filter(e => e.address !== currentEmail.address);
+    saveEmailsToStorage();
+    
+    // Обновляем UI
+    if (emails.length > 0) {
+        renderEmailsList();
+        selectEmail(emails[0]);
+    } else {
+        renderEmailsList();
+        showNoEmailState();
+    }
+    
+    showToast('Почта удалена', 'success');
+}
 
-```javascript
-GET /api/generate-email      // Создать новую почту
-GET /api/get-messages?email=xxx  // Получить письма
-GET /api/read-message?email=xxx&id=123  // Прочитать письмо
-GET /api/get-domains          // Получить доступные домены
-GET /api/test                 // Проверка работы сервера
-```
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
-## 📁 Структура проекта
+function showToast(message, type = 'success') {
+    copyNotification.textContent = message;
+    copyNotification.style.background = type === 'success' ? 'var(--success)' : 'var(--error)';
+    copyNotification.classList.remove('hidden');
+    
+    setTimeout(() => {
+        copyNotification.classList.add('hidden');
+    }, 2000);
+}
 
-```
-dropwin-mail-fixed/
-├── package.json          # Зависимости npm
-├── server.js             # Backend (Express + 1secmail API)
-├── README.md             # Эта инструкция
-└── public/               # Frontend
-    ├── index.html        # HTML страница
-    ├── style.css         # Темные стили
-    └── script.js         # JavaScript логика
-```
+function showLoadingButton(button, icon = false) {
+    if (icon) {
+        button.innerHTML = `
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style="animation: spin 1s linear infinite;">
+                <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="2" fill="none" opacity="0.3"/>
+                <path d="M9 2a7 7 0 0 1 7 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
+            </svg>
+        `;
+    } else {
+        button.disabled = true;
+        button.style.opacity = '0.6';
+        button.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" style="animation: spin 1s linear infinite;">
+                <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="2" fill="none" opacity="0.3"/>
+                <path d="M10 2a8 8 0 0 1 8 8" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
+            </svg>
+            Создание...
+        `;
+    }
+}
 
-## ❓ Частые вопросы
+function restoreButton(button, icon = false) {
+    if (icon) {
+        button.innerHTML = `
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <path d="M2.25 9C2.25 5.27208 5.27208 2.25 9 2.25C11.0597 2.25 12.9084 3.16479 14.1562 4.59375M15.75 9C15.75 12.7279 12.7279 15.75 9 15.75C6.94034 15.75 5.09158 14.8352 3.84375 13.4062" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M14.25 2.25V4.875H11.625" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M3.75 15.75V13.125H6.375" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        `;
+    } else {
+        button.disabled = false;
+        button.style.opacity = '1';
+        button.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M10 4V16M4 10H16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+        `;
+    }
+}
 
-### Письма не приходят?
+function formatDate(dateString) {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diff = now - date;
+    
+    if (diff < 60000) return 'Только что';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} мин. назад`;
+    if (date.toDateString() === now.toDateString()) {
+        return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    }
+    
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (date.toDateString() === yesterday.toDateString()) {
+        return 'Вчера, ' + date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    }
+    
+    return date.toLocaleString('ru-RU', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
 
-1. **Проверьте адрес** - убедитесь что отправили на правильный email
-2. **Подождите** - письма могут идти до 60 секунд
-3. **Нажмите обновить** - кнопка с круговой стрелкой
-4. **Проверьте консоль** - откройте F12 и посмотрите ошибки
+function formatRelativeTime(isoString) {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diff = now - date;
+    
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    
+    if (minutes < 1) return 'Только что';
+    if (minutes < 60) return `${minutes} мин. назад`;
+    if (hours < 24) return `${hours} ч. назад`;
+    if (days < 7) return `${days} д. назад`;
+    
+    return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
 
-### Почта не работает совсем?
+function getMessageWord(count) {
+    const cases = [2, 0, 1, 1, 1, 2];
+    const words = ['письмо', 'письма', 'писем'];
+    return words[(count % 100 > 4 && count % 100 < 20) ? 2 : cases[Math.min(count % 10, 5)]];
+}
 
-1. Убедитесь что сервер запущен (`npm start`)
-2. Откройте http://localhost:3000/api/test
-3. Должен быть ответ: `"success": true`
-4. Проверьте что порт 3000 не занят
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
 
-### Как проверить что API работает?
-
-Откройте в браузере:
-```
-http://localhost:3000/api/test
-```
-
-Должен вернуться JSON с `"success": true`
-
-## 🔒 Безопасность
-
-⚠️ **ВАЖНО:**
-- НЕ используйте для важных аккаунтов
-- НЕ привязывайте к банкам или соцсетям
-- Письма хранятся временно
-- Нет паролей - любой может прочитать
-
-✅ **Подходит для:**
-- Одноразовых регистраций
-- Тестирования email рассылок
-- Подтверждения email на форумах
-- Временных аккаунтов
-
-## 🛠️ Технологии
-
-- **Backend:** Node.js + Express
-- **API:** 1secmail.com public API
-- **Frontend:** Vanilla JavaScript
-- **Стили:** CSS Grid/Flexbox
-- **Хранилище:** LocalStorage
-
-## 📞 Поддержка
-
-Если возникли проблемы:
-
-1. Проверьте что Node.js установлен: `node --version`
-2. Проверьте что npm установлен: `npm --version`
-3. Переустановите зависимости: `npm install --force`
-4. Перезапустите сервер: Ctrl+C → `npm start`
-5. Очистите кеш браузера (Ctrl+Shift+Delete)
-
-## 🎉 Готово!
-
-Теперь у вас есть полностью рабочая временная почта с реальными письмами!
-
----
-
-**Автор:** DropWin Team  
-**Версия:** 2.1.0 (FIXED)  
-**Лицензия:** MIT  
-**API:** 1secmail.com
+// Добавляем CSS для анимации вращения
+const style = document.createElement('style');
+style.textContent = `
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+`;
+document.head.appendChild(style);
